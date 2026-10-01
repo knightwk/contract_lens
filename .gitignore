@@ -1,0 +1,30 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+
+# ---------- 环境变量（含密钥，绝不提交）----------
+.env
+
+# ---------- 模型权重 ----------
+models/
+
+# ---------- 运行时数据 ----------
+data/
+logs/
+volumes/
+
+# ---------- 编辑器 ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store

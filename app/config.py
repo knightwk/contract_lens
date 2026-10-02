@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_api_model: str = ""
 
+    # === 推理调度（本地模型）===
+    max_concurrent_inference: int = 2
+    embedding_batch_size: int = 32
+    rerank_batch_size: int = 16
+    embedding_query_instruction: str = "为这个句子生成表示以用于检索相关文章："
+    rerank_max_length: int = 512  # W2 优化时降到 256
+    model_api_timeout: float = 30.0  # provider=api 时的 HTTP 超时
+
     # === Milvus ===
     milvus_host: str = "localhost"
     milvus_port: int = 19530

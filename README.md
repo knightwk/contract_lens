@@ -10,7 +10,7 @@
 
 ## 当前状态
 
-**Day 1 / 42**（W1 — 闭环打通 + 本地模型就位）
+**Day 2 / 42**（W1 — 闭环打通 + 本地模型就位）
 
 已完成：
 
@@ -19,12 +19,15 @@
 - [x] 统一日志（控制台 + 文件，多线程安全）
 - [x] FastAPI 入口 + lifespan + 健康检查
 - [x] 依赖版本锁定
+- [x] **本地模型就位**：`bge-base-zh-v1.5` + `bge-reranker-base`，CPU 推理
+- [x] `model_runtime`：单例加载 / lifespan 预热 / 线程数控制 / 并发闸门
+- [x] embedding 与 rerank 的"本地 + API"双实现及 Provider 切换
 
 进行中：
 
-- [ ] 本地 BGE 模型下载与 `model_runtime` 实现（Day 2）
 - [ ] Milvus 部署（需 Docker，Day 3）
 
+> 冷启动与延迟基线见 [`docs/experiments.md`](docs/experiments.md)（EXP-002）。
 > **结果数据待 W4 评测跑完后填写。** 本 README 不放未经验证的数字。
 
 ---
@@ -59,7 +62,8 @@
 | Python | 3.12 | 是 |
 | git | 任意 | 是 |
 | Docker Desktop | 最新 | W1 Day 3 起（Milvus） |
-| 内存 | ≥ 8 GB | 建议（本地模型约 1.5 GB） |
+| 磁盘 | ≥ 3 GB | 模型约 1.5 GB + 依赖 |
+| 内存 | ≥ 8 GB | 建议（本地模型常驻约 1.5 GB） |
 
 ### 2. 创建虚拟环境
 
@@ -82,12 +86,15 @@ pip install -r requirements.txt
 依赖较重（含 PyTorch），首次安装需要几分钟。分步安装便于定位冲突：
 
 ```powershell
-pip install fastapi "uvicorn[standard]" pydantic==2.11.4 pydantic-settings python-dotenv loguru==0.7.3
+pip install fastapi "uvicorn[standard]" pydantic==2.12.0 pydantic-settings python-dotenv loguru==0.7.3
 pip install torch "transformers>=4.45,<5.0" sentence-transformers==5.7.0
-pip install pymilvus==2.6.17 openai==1.99.5 httpx==0.28.1 tenacity==9.1.2 tiktoken==0.9.0 numpy==2.2.6 pypdf python-docx streamlit
-pip install langgraph==1.2.12 "mcp[cli]==2.2.0" ragas==0.4.3 langfuse==4.16.0 redis
+pip install pymilvus==2.6.17 "openai>=3.3,<4.0" httpx==0.28.1 tenacity==9.1.2 tiktoken==0.9.0 numpy==2.2.6 pypdf python-docx streamlit
+pip install langgraph==1.2.12 "mcp[cli]==2.2.0" ragas==0.4.3 langfuse==4.16.0 "redis>=5.0,<9.0"
 pip install pytest==8.4.1 pytest-asyncio==0.26.0 ruff==0.12.8
 ```
+
+> ⚠️ `openai` 必须是 **3.x**：`ragas` 依赖的 `langchain-openai` 要求 `openai>=2.45.0,<4.0.0`，
+> 装 1.x 会导致解析失败。详见「版本策略」。
 
 ### 4. 配置环境变量
 
@@ -102,15 +109,54 @@ Copy-Item .env.example .env
 | `DEBUG` | `true` | 生产环境必须为 `false`（否则 `/docs` 对外暴露） |
 | `EMBEDDING_PROVIDER` | `local` | `local` 或 `api` |
 | `RERANK_PROVIDER` | `local` | `local` 或 `api` |
+| `TORCH_NUM_THREADS` | `4` | torch 内部线程数。建议 `× MAX_CONCURRENT_INFERENCE` ≈ CPU 物理核数 |
 | `LLM_API_KEY` | 空 | Day 3 起需要 |
 
-### 5. 启动
+> `.env` 必须存为 **UTF-8**——`EMBEDDING_QUERY_INSTRUCTION` 含中文，存成 GBK 会读成乱码且不报错。
+
+### 5. 下载本地模型（约 1.5 GB）
+
+**这一步不能跳过。** `models/` 不进 Git，而服务启动时会加载模型——缺失则启动直接失败。
+
+```powershell
+python scripts/download_models.py
+```
+
+下载到 `./models/bge-base-zh-v1.5`（102M 参数）与 `./models/bge-reranker-base`（278M 参数）。
+脚本内置国内镜像 `hf-mirror.com`；换源改 `scripts/download_models.py`。
+
+下载完跑一次冒烟测试，确认模型可用并记录**本机延迟基线**：
+
+```powershell
+python scripts/smoke_test_models.py
+```
+
+离线自包含验证（确认模型目录不依赖网络）：
+
+```powershell
+$env:HF_HUB_OFFLINE="1"; python scripts/smoke_test_models.py; Remove-Item Env:\HF_HUB_OFFLINE
+```
+
+### 6. 启动
 
 ```powershell
 uvicorn app.main:app --reload
 ```
 
-### 6. 验证
+启动日志里应出现两行冷启动计时（预热在 `lifespan` 中完成，避免第一个请求承担冷启动）：
+
+```
+加载 embedding 模型: ...\models\bge-base-zh-v1.5
+embedding 就绪 | 冷启动 0.90s
+加载 rerank 模型: ...\models\bge-reranker-base
+rerank 就绪 | 冷启动 1.78s
+ContractLens 启动完成，准备接收请求
+```
+
+> 模型预热失败会导致**服务拒绝启动**（fail fast）——模型是本服务的核心能力，
+> 与其带着坏掉的检索对外服务，不如启动就报错。
+
+### 7. 验证
 
 ```powershell
 curl.exe http://127.0.0.1:8000/health
@@ -125,11 +171,24 @@ curl.exe http://127.0.0.1:8000/health
   "debug": true,
   "providers": { "embedding": "local", "rerank": "local" },
   "models": { "embedding": "bge-base-zh-v1.5", "rerank": "bge-reranker-base", "dim": 768 },
-  "models_ready": false
+  "models_ready": true,
+  "model_runtime": {
+    "embedder_loaded": true,
+    "embedder_warmed": true,
+    "reranker_loaded": true,
+    "reranker_warmed": true,
+    "torch_threads": 4
+  }
 }
 ```
 
-**`app` 字段必须等于 `.env` 里的 `APP_NAME`**——这是验证配置真正生效的方式。若不符，说明 `.env` 没被读到。
+三个字段值得留意：
+
+| 字段 | 说明 |
+| --- | --- |
+| `app` | 必须等于 `.env` 里的 `APP_NAME`——验证配置真正生效。不符说明 `.env` 没被读到 |
+| `models_ready` | 本地模型是否就绪。`provider=api` 时不检查本地模型 |
+| `model_runtime.torch_threads` | 必须等于 `TORCH_NUM_THREADS`。**如果等于 CPU 核数，说明线程数没设上** |
 
 交互式 API 文档（仅 `DEBUG=true`）：<http://127.0.0.1:8000/docs>
 
@@ -140,16 +199,16 @@ curl.exe http://127.0.0.1:8000/health
 ```
 contract_lens/
 ├── app/
-│   ├── main.py                 # FastAPI 入口 + lifespan（模型预热挂载点）
+│   ├── main.py                 # FastAPI 入口 + lifespan（模型预热）
 │   ├── config.py               # 配置中心（pydantic-settings）
 │   ├── api/
 │   │   ├── health.py           # 基础设施端点（不版本化）
 │   │   ├── router.py           # 业务路由汇总（挂 /api/v1）
 │   │   └── v1/                 # documents / review / reports
 │   ├── core/                   # 通用能力
-│   │   ├── model_runtime.py    # ★ 模型加载/预热/线程调度/Provider 切换
-│   │   ├── embedding.py        # 本地 + API 双实现
-│   │   ├── reranker.py         # 本地 + API 双实现
+│   │   ├── model_runtime.py    # ★ 本地模型加载/预热/线程调度/并发闸门
+│   │   ├── embedding.py        # 本地 + API 双实现（含 Provider 工厂）
+│   │   ├── reranker.py         # 本地 + API 双实现（含 Provider 工厂）
 │   │   ├── parser.py           # 文档解析
 │   │   ├── chunker.py          # 条款级切分
 │   │   ├── vector_store.py     # Milvus schema（稠密 + BM25）
@@ -174,11 +233,14 @@ contract_lens/
 │   ├── mcp/                    # MCP Server（Tools + Resources）
 │   └── evaluation/             # 评测集 + 断言 + 模型对比
 ├── ui/streamlit_app.py
-├── scripts/download_models.py  # 模型预下载
+├── scripts/
+│   ├── download_models.py      # 模型预下载（约 1.5 GB）
+│   └── smoke_test_models.py    # 模型冒烟测试 + 延迟基线
 ├── tests/                      # 含 failure_cases/ 故障实验记录
 ├── models/                     # 模型权重（不进 Git，约 1.5 GB）
 ├── docs/
 │   ├── conventions.md          # ★ 编码约定（动手前必读）
+│   ├── experiments.md          # ★ 实验记录（延迟基线 / 对比实验）
 │   ├── architecture.md
 │   ├── evaluation_report.md    # 结果表
 │   └── interview_qa.md
@@ -203,6 +265,12 @@ contract_lens/
 | `transformers` | 5.18.0 | **4.x 稳定线** | 5.x 是新大版本，生态适配仍在推进 |
 | `sentence-transformers` | 6.1.0 | **5.7.0** | 6.x 依赖 transformers 5.x；5.7.0 + transformers 4.x 组合更成熟 |
 
+> ⚠️ `openai` 锁在 3.x **不属于**上表的"主动选旧"——它是**被依赖约束**的结果：
+> `ragas` → `langchain-openai` 要求 `openai>=2.45.0,<4.0.0`，1.x 无法共存。
+>
+> 这类**被动锁定**比主动选旧更值得警惕：一个只在 W4 评测期用到的依赖，
+> 替你决定了全项目的 SDK 大版本。发现它靠的是**查依赖约束**，不是靠读版本号。
+
 版本约束写法：
 
 - **`==` 精确锁定**：跨大版本会破坏 API 兼容的包（`pymilvus`、`langgraph`、`mcp`、`langfuse`、`pydantic` 等）
@@ -215,6 +283,9 @@ pip freeze | Out-File -Encoding utf8 requirements.lock.txt
 ```
 
 > Windows PowerShell 5.1 下 `>` 默认写 UTF-16，会导致锁文件在 Linux 容器中乱码，因此显式指定 UTF-8。
+
+**注意**：`pip check` **只检查已装包之间的依赖一致性，不检查是否满足 `requirements.txt`**。
+两份文件是否一致需要单独比对——见 `scripts/`（W4 补一个 CI 检查）。
 
 ---
 
@@ -238,6 +309,7 @@ pip freeze | Out-File -Encoding utf8 requirements.lock.txt
 | [`ContractLens_项目规划文档.md`](ContractLens_项目规划文档.md) | 定位、架构、边界、本地模型方案、评测、交付标准 |
 | [`ContractLens_学习开发计划.md`](ContractLens_学习开发计划.md) | 42 天逐日任务、版本清单、知识点 |
 | [`docs/conventions.md`](docs/conventions.md) | **编码约定（动手前必读）** |
+| [`docs/experiments.md`](docs/experiments.md) | **实验记录**：延迟基线、检索方案对比、本地 vs API |
 
 ---
 

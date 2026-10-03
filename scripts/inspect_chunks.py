@@ -67,16 +67,10 @@ def main() -> int:
     lengths = [len(c.text) for c in chunks]
     print(f"块数 {len(chunks)} | 平均 {sum(lengths) // len(lengths)} 字 | 最长 {max(lengths)} 字")
 
-    # ← 统计口径：前言可能被二次切分成多【块】，但它只是 1【组】。
-    # 原来直接数"没有条款号的块"，会把前言的多个分片误报成"正文块没识别到条款号"
-    # （Day 3 实测：B 文档因此产生了一条假警告）。
-    # 假警告比没有警告更糟 —— 它会训练你忽略警告。
-    first_numbered = next((i for i, c in enumerate(chunks) if c.clause_no), len(chunks))
-    preamble_blocks = first_numbered  # 开头连续的无条款号块 = 前言（可能被切分）
-    orphan = [c for c in chunks[first_numbered:] if not c.clause_no]
+    numbered = [c for c in chunks if c.clause_no]
+    unnumbered = [c for c in chunks if not c.clause_no]
 
-    print(f"前言：{preamble_blocks} 块（被切分属正常）")
-    print(f"正文中缺条款号：{len(orphan)} 块")
+    print(f"带条款号：{len(numbered)} 块    |    无条款号：{len(unnumbered)} 块（前言 / 附件 / 签署区）")
 
     sections = Counter(c.section for c in chunks if c.section)
     if sections:
@@ -86,6 +80,16 @@ def main() -> int:
         # 否则这个统计等于没做（Day 3 实测：A 文档输出 0 个，无从判断是哪一种）。
         print("覆盖章节：0 个（本文档无章节级结构，或章节识别失败 —— 需人工确认）")
 
+    # ← P1 的核心可观测指标：单个条款吞了多少块。
+    # 修复前 A 文档「第十五条」占 33/78 = 42%（附件和签署页全被算进最后一条）。
+    # 修复后应显著下降；如果仍然很高，说明还有哨兵形态没覆盖到。
+    groups = Counter(c.clause_no for c in numbered)
+    if groups:
+        top_no, top_n = groups.most_common(1)[0]
+        share = top_n / len(chunks)
+        flag = "   ⚠️ 单条款占比 > 25%，可能仍在吞附件" if share > 0.25 else ""
+        print(f"条款组：{len(groups)} 个    最大：{top_no} -> {top_n} 块（{share:.0%}）{flag}")
+
     if over:
         print(f"\n❌ 超过 {limit} token 的块：{len(over)} —— 必须为 0")
         for c in over:
@@ -93,8 +97,10 @@ def main() -> int:
         return 1
 
     print("\n✅ 无超限块")
-    if args.strategy == "clause" and orphan:
-        print(f"⚠️ 正文中有 {len(orphan)} 块没识别到条款号（非前言），检查正则或文档结构")
+    if args.strategy == "clause" and not numbered:
+        # 注意：无条款号的块现在包含【附件与签署区】，是正常形态，不再据此告警。
+        # 只有「一个条款号都没识别到」才说明条款正则失效。
+        print("⚠️ 没有任何块识别到条款号 —— 检查正则，或该文档确实没有条款结构")
     return 0
 
 

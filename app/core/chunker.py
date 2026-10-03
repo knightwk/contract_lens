@@ -45,6 +45,36 @@ _RE_SUB_ITEM = re.compile(
 
 _RE_SENTENCE_END = re.compile(r"(?<=[。；;！!？?])")
 
+# ---------- 分节哨兵：正文结束 / 进入附件 ----------
+#
+# ← P1 修复（Day 3 真实合同实测）。条款边界只认「第X条」，而附件、签署页、
+#   评估表格里【没有条款号】—— 这些行原本全部被追加到最后一个条款名下。
+#   Day 3 实测：A 文档「第十五条」吞了 33 块（占 42%），B 文档「第二十六条」吞了 7 块。
+#
+#   后果是 clause_no【语义错误】—— 报告引用「第十五条」去说明一个其实来自
+#   附件表格的问题。这比 chunk_id 碰撞更危险：ID 碰撞只是位置丢失，
+#   而这个是「ID 有效但指向错误的对象」，而且同样静默。
+#
+# 命中哨兵就 flush 当前条款，后续内容成为【无条款号】的独立组。
+#
+# 为什么不改用「条款长度上限」来兜底：
+#   真正超长的【条款】应该被切成多块但都保留 clause_no —— 那是
+#   _split_long_clause 的职责。长度上限无法区分「长条款」和「条款 + 尾部垃圾」，
+#   用它会在解决一个错误的同时制造另一个。
+
+# 附件标题：附件1 / 附件一 / 附件A。
+# 必须带编号 —— 否则正文里的「附件列表如下」会被误判成附件起点。
+_RE_APPENDIX = re.compile(r"^\s*附\s*件\s*(?:[0-9]+|[一二三四五六七八九十]+|[A-Za-z])(?=\s|$|[：:、.．])")
+
+# 正文结束标记。纯标记行，无信息量 —— 命中后 flush 并直接丢弃这一行。
+_RE_BODY_END = re.compile(r"^\s*[（(]?\s*以下(?:无正文|空白)\s*[）)]?\s*[。.]?\s*$")
+
+# 签署区：整行以「（盖章 / 签名 / 签字…）」结尾的短行。
+# 故意用「以括号结尾」而不是角色词（甲方 / 乙方）—— 这样能覆盖
+# 「乙方监护人（签名或盖章）：」这类变体；同时正文里括号后面还有字，
+# 不会以括号为行尾，天然被排除。
+_RE_SIGNATURE = re.compile(r"^.{0,16}[（(][^）)\n]{0,16}(?:盖章|签名|签字|签章|签印)[^）)\n]{0,16}[）)]\s*[：:]?\s*$")
+
 
 # ---------- token 计数 ----------
 
@@ -123,14 +153,23 @@ def _clause_title_of(line: str) -> str | None:
 
 
 def _split_into_clauses(doc: ParsedDocument) -> list[_Clause]:
-    """按 章/节/条 边界把 blocks 归组成条款
+    """按 章 / 节 / 条 + 分节哨兵 把 blocks 归组成条款。
 
     用状态机维护章节上下文——一次性正则做不到这件事。
+
+    ← P1 修复要点：命中分节哨兵时 flush 当前条款，后续内容成为
+    【无条款号】的独立组，而不是继续追加到最后一个条款名下。
+
+    三类组的形态：
+      1. 有条款号的组 —— 正文条款，clause_no / clause_title / section 齐全
+      2. 无条款号的组（前言）—— 文档开头、第一条之前
+      3. 无条款号的组（附件 / 签署区）—— 哨兵之后，section 为 None
     """
     clauses: list[_Clause] = []
-    current: _Clause | None = None
+    current: _Clause | None = None  # 当前正在收集行的组（可能有条款号，也可能没有）
     chapter: str | None = None
     section: str | None = None
+    started = False  # 是否已出现第一个条款 / 哨兵
 
     offset = 0
     preamble: list[str] = []
@@ -142,13 +181,19 @@ def _split_into_clauses(doc: ParsedDocument) -> list[_Clause]:
             clauses.append(current)
         current = None
 
+    def open_unnumbered(line: str, start: int, page: int | None, title: str | None, sec: str | None) -> _Clause:
+        """开一个【无条款号】的组 —— 附件、签署区、章节引言都走这里。"""
+        return _Clause(lines=[line], clause_no=None, clause_title=title, section=sec, page=page, char_start=start)
+
     for block in doc.blocks:
         line = block.text
         line_start = offset
         offset += len(line) + 1  # raw_text 用 "\n" 连接
 
+        # --- 1) 条款边界（最高优先级）---
         if _RE_CLAUSE.match(line):
             flush()
+            started = True
             current = _Clause(
                 lines=[line],
                 clause_no=_clause_no_of(line),
@@ -159,6 +204,7 @@ def _split_into_clauses(doc: ParsedDocument) -> list[_Clause]:
             )
             continue
 
+        # --- 2) 章节边界（只更新上下文，本身不是条款）---
         if _RE_SECTION.match(line):
             flush()
             section = line
@@ -170,9 +216,45 @@ def _split_into_clauses(doc: ParsedDocument) -> list[_Clause]:
             section = None  # 换章必须清空节，否则会串台
             continue
 
-        # 普通行：归给当前条款；还没有条款则归入前言
+        # --- 3) 分节哨兵 ---
+        if _RE_BODY_END.match(line):
+            flush()
+            started = True
+            continue  # 「以下无正文」是纯标记，无信息量，丢弃这一行
+
+        if _RE_APPENDIX.match(line):
+            # 附件标题是真正的分界线，永远开新组
+            flush()
+            started = True
+            current = open_unnumbered(
+                line,
+                line_start,
+                block.page,
+                line.strip(),  # 附件标题作为组标题
+                None,  # 附件【不属于任何章节】—— 挂上章节名会误导检索
+            )
+            continue
+
+        if _RE_SIGNATURE.match(line):
+            started = True
+            if current is None or current.clause_no is not None:
+                # 只有当前是【有条款号的正文】时才断开。
+                # 若已经在尾部组里就继续追加 —— 否则「甲方（盖章）」「乙方（签名）」
+                # 「日期」会各自变成独立小块，制造一堆 5 个字的噪声 chunk。
+                flush()
+                current = open_unnumbered(line, line_start, block.page, None, None)
+            else:
+                current.lines.append(line)
+            continue
+
+        # --- 4) 普通行 ---
         if current is not None:
             current.lines.append(line)
+        elif started:
+            # 已进入正文但没有当前条款（章节引言 / flush 之后的续文）——
+            # 开一个无条款号的组。绝【不能】倒回 preamble：
+            # 那会把文档中段的内容插到文档最开头，位置信息全乱。
+            current = open_unnumbered(line, line_start, block.page, None, section or chapter)
         else:
             if preamble_start is None:
                 preamble_start = line_start

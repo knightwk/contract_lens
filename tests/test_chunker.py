@@ -208,3 +208,87 @@ def test_chunk_id_still_deterministic_with_position():
     a = [c.chunk_id for c in chunk_by_clause(doc)]
     b = [c.chunk_id for c in chunk_by_clause(doc)]
     assert a == b
+
+
+# ---------- P1 回归：尾部内容不得挂到最后一个条款 ----------
+
+
+def _doc_with_appendix_tail() -> ParsedDocument:
+    """构造「正文 + 以下无正文 + 签署区 + 两个附件」的文档。
+
+    模拟真实合同结构（Day 3 的养老机构服务合同就是这个形态）：
+    附件和签署页里没有「第X条」，所以原本全被追加到最后一个条款名下。
+    """
+    lines = [
+        "测试服务合同",
+        "第一条 服务内容",
+        "乙方应当提供系统开发服务。",
+        "第二条 合同生效",
+        "本合同自双方签字之日起生效。",
+        "以下无正文",
+        "甲方（盖章）：",
+        "乙方监护人（签名或盖章）：",
+        "日期：____年__月__日",
+        "附件1 技术服务清单",
+        "序号 服务项 数量 单价",
+        "1 需求分析 1 10000",
+        "附件2 验收标准",
+        "系统应当通过全部验收用例。",
+    ]
+    blocks = [Block(text=text, page=1, kind="paragraph") for text in lines]
+    return ParsedDocument(
+        doc_id="tailtest00000000",
+        filename="tail.md",
+        source_type="md",
+        blocks=blocks,
+        raw_text="\n".join(b.text for b in blocks),
+    )
+
+
+def test_tail_content_is_not_attached_to_last_clause():
+    """← P1 回归用例（Day 3 真实合同实测暴露）。
+
+    修复前：附件与签署区全部被追加到最后一个条款名下。
+    Day 3 实测 A 文档「第十五条」占 33/78 块（42%），B 文档「第二十六条」占 7/51。
+    后果是 clause_no【语义错误】—— 引用指向错误的条款，而且静默发生。
+    """
+    chunks = chunk_by_clause(_doc_with_appendix_tail())
+
+    second = [c for c in chunks if c.clause_no == "第二条"]
+    assert len(second) == 1, "第二条不该被切成多块"
+
+    body = second[0].text
+    assert "本合同自双方签字之日起生效。" in body
+    assert "附件" not in body, f"附件内容串进了条款：{body!r}"
+    assert "盖章" not in body and "签名" not in body, f"签署区串进了条款：{body!r}"
+
+
+def test_appendix_groups_are_unnumbered_and_titled():
+    """附件应成为【无条款号】的独立组，并以附件标题作为组标题。"""
+    chunks = chunk_by_clause(_doc_with_appendix_tail())
+
+    appendix = [c for c in chunks if c.clause_title and c.clause_title.startswith("附件")]
+    assert {c.clause_title for c in appendix} == {"附件1 技术服务清单", "附件2 验收标准"}
+    assert all(c.clause_no is None for c in appendix), "附件不应带条款号"
+    assert all(c.section is None for c in appendix), "附件不应继承章节（会误导检索）"
+
+    # 两个附件的内容各自独立，不能互相串
+    first = next(c for c in appendix if c.clause_title == "附件1 技术服务清单")
+    assert "需求分析" in first.text
+    assert "验收用例" not in first.text
+
+
+def test_body_end_marker_is_dropped():
+    """「以下无正文」是纯标记行，不应出现在任何块里。"""
+    chunks = chunk_by_clause(_doc_with_appendix_tail())
+    assert not any("以下无正文" in c.text for c in chunks)
+
+
+def test_signature_lines_share_one_group():
+    """签署区的多行应归入同一个组，不能每行一个 5 字噪声块。"""
+    chunks = chunk_by_clause(_doc_with_appendix_tail())
+
+    sig = [c for c in chunks if c.clause_no is None and "盖章" in c.text]
+    assert len(sig) == 1, f"签署区被切成了 {len(sig)} 组"
+    assert "乙方监护人" in sig[0].text
+    assert "日期" in sig[0].text

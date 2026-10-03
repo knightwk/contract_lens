@@ -58,12 +58,18 @@ class Settings(BaseSettings):
     embedding_model_name: str = "bge-base-zh-v1.5"
     rerank_model_name: str = "bge-reranker-base"
 
-    # 向量维度。注意：换 embedding 模型必须改这里，
-    # 且 Milvus 集合必须重建 + 全部文档重新向量化。
+    # 向量维度。注意：换 embedding 模型必须改这里，且 Milvus 集合必须重建 + 全部文档重新向量化。
     # bge-base-zh=768 / bge-small-zh=512 / bge-large-zh=1024 / bge-m3=1024
     embedding_dim: int = 768
 
     torch_num_threads: int = 4
+
+    # === 切分参数 ===
+    chunk_max_chars: int = 400
+    chunk_overlap: int = 50  # 仅用于超长条款的二次切分
+
+    # 兜底值。实际优先取 tokenizer 的 model_max_length (换模型会自动跟随)
+    embedding_max_tokens: int = 512
 
     # === 模型 API 备用（provider=api 时生效）===
     embedding_api_base: str = ""

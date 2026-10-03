@@ -308,7 +308,9 @@ pip freeze | Out-File -Encoding utf8 requirements.lock.txt
 | --- | --- |
 | [`ContractLens_项目规划文档.md`](ContractLens_项目规划文档.md) | 定位、架构、边界、本地模型方案、评测、交付标准 |
 | [`ContractLens_学习开发计划.md`](ContractLens_学习开发计划.md) | 42 天逐日任务、版本清单、知识点 |
+| [`docs/learning_protocol.md`](docs/learning_protocol.md) | **学习流程约定（每天怎么干）** |
 | [`docs/conventions.md`](docs/conventions.md) | **编码约定（动手前必读）** |
+| [`docs/decisions.md`](docs/decisions.md) | **决策记录（模式库）** —— 面试素材直接从这里取 |
 | [`docs/experiments.md`](docs/experiments.md) | **实验记录**：延迟基线、检索方案对比、本地 vs API |
 
 ---

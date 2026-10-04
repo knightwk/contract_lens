@@ -16,7 +16,11 @@ class ParsedDocument(BaseModel):
 
     doc_id: str
     filename: str
-    source_type: Literal["pdf", "docs", "md"]
+    # ⚠️ 必须与 parser.py 的 _PARSERS 注册值一致。
+    # 这里曾经写成 "docs"（多一个 s），而 parser 注册的是 "docx" ——
+    # 结果就是【一解析 .docx 就抛 ValidationError】，而且错误信息指向 schema 不指向 parser。
+    # 教训：字面量联合类型改了要全局搜一遍。
+    source_type: Literal["pdf", "docx", "md"]
     blocks: list[Block] = Field(default_factory=list)
     raw_text: str = ""
     meta: dict[str, Any] = Field(default_factory=dict)  # 页数、字符等元信息
@@ -58,6 +62,37 @@ class Chunk(BaseModel):
     @property
     def location(self) -> str:
         """人类可读的定位串，报告里可以直接用。"""
+        parts = [p for p in (self.section, self.clause_no, self.clause_title) if p]
+        if parts:
+            return " . ".join(parts)
+        return f"{self.doc_id}#{self.char_start}"
+
+
+class SearchHit(BaseModel):
+    """一次检索的命中结果。
+
+    字段与 Chunk 对齐 —— 检索出来的东西最终要变成报告里的【引用】（约定 5），
+    所以定位信息必须一路带回来，不能在检索层丢掉。
+    """
+
+    chunk_id: str
+    doc_id: str
+    text: str
+    score: float
+
+    # --- 定位（约定 5）---
+    clause_no: str | None = None
+    clause_title: str | None = None
+    section: str | None = None
+    page: int | None = None
+    char_start: int = 0
+    char_end: int = 0
+
+    # 来源：混合检索时用来判断这一条是谁召回的
+    source: Literal["dense", "bm25", "hybrid"] = "dense"
+
+    @property
+    def location(self) -> str:
         parts = [p for p in (self.section, self.clause_no, self.clause_title) if p]
         if parts:
             return " . ".join(parts)

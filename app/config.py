@@ -92,10 +92,32 @@ class Settings(BaseSettings):
     milvus_port: int = 19530
     milvus_collection_prefix: str = "contract_lens"
 
+    # === Milvus 索引与写入 ===
+    milvus_insert_batch_size: int = 256
+    # HNSW=近似检索（快、占内存）；FLAT=精确检索（小数据量下可当"无近似误差"的基线）
+    milvus_dense_index: Literal["HNSW", "FLAT"] = "HNSW"
+    milvus_hnsw_m: int = 16
+    milvus_hnsw_ef_construction: int = 200
+    milvus_search_ef: int = 64
+    # chinese=jieba 分词；standard=按字切。
+    # 对「第十二条」这类编号的精确匹配，按字切反而可能更稳 —— 这是个真实可测项，列在 W2。
+    milvus_text_analyzer: str = "chinese"
+    milvus_rrf_k: int = 60
+    milvus_timeout: float = 10.0
+
     # === Redis ===
     redis_url: str = "redis://localhost:6379/0"
 
     # === 派生属性（不是配置项，是算出来的）===
+
+    @property
+    def milvus_uri(self) -> str:
+        return f"http://{self.milvus_host}:{self.milvus_port}"
+
+    @property
+    def milvus_collection_name(self) -> str:
+        """集合全名。集中在一处，避免集合名散落在各个模块里拼字符串。"""
+        return f"{self.milvus_collection_prefix}_chunks"
 
     @property
     def embedding_model_path(self) -> Path:

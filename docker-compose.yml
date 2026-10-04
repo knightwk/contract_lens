@@ -1,0 +1,79 @@
+# Milvus 2.6 standalone：etcd（元数据）+ minio（对象存储）+ milvus
+#
+# 用法
+#     docker compose up -d
+#     docker compose ps          # 三个容器都应是 healthy（milvus 冷启动 60~90s）
+#
+# ⚠️ milvus 的镜像 tag 必须与 pymilvus 同大版本（2.6.x）。
+#    下面先写 v2.6.0 —— 执行前请到官方 release 页确认最新的 2.6 补丁版本再替换。
+#    （这就是 Day 1 我们没用 pymilvus 3.0.2 的原因，见 docs/decisions.md D-003）
+#
+# 数据卷落在 ./volumes/，已加入 .gitignore
+
+services:
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ./volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    container_name: milvus-minio
+    # ⚠️ MinIO 的镜像源两条路都有问题（均已实测）：
+    #   1. docker.io  —— 本机直连超时（国内网络）
+    #   2. quay.io    —— 匿名拉取返回 401（MinIO 自 2025-10 起提高了分发门槛）
+    # 解决办法：走 Docker Hub，但通过 registry-mirrors 或镜像前缀拉，再保留本名。
+    #   docker pull <mirror>/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    #   docker tag  <mirror>/minio/minio:RELEASE.2024-12-18T13-15-44Z minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"   # 控制台
+      - "9000:9000"
+    volumes:
+      - ./volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.6.0
+    command: ["milvus", "run", "standalone"]
+    # ← 少了这行 Milvus 起不来
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ./volumes/milvus:/var/lib/milvus
+    healthcheck:
+      # ← start_period 别省：Milvus 冷启动慢，健康检查太急会让你误判部署失败
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"   # SDK 连接口
+      - "9091:9091"     # metrics / healthz
+    depends_on:
+      - etcd
+      - minio

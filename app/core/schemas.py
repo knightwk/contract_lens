@@ -97,3 +97,32 @@ class SearchHit(BaseModel):
         if parts:
             return " . ".join(parts)
         return f"{self.doc_id}#{self.char_start}"
+
+
+class RagAnswer(BaseModel):
+    """一次问答的结果。
+
+    **为什么要连 hits 一起返回**：
+        模型说"依据第十二条"，这句话本身无法验证 —— 它可能编造。
+        把检索到的材料原样带回来，调用方才能核对"它引用的那条真的存在吗"。
+        这是约定 5（引用可回溯）在这一层的落点。
+
+    W3 Day 15 做结构化输出时，会把「模型引用了哪几条」解析成独立字段；
+    现在先靠 hits 做人工核对。
+    """
+
+    question: str
+    answer: str
+
+    # 检索到的材料（含完整定位信息），供核对引用真伪
+    hits: list[SearchHit] = Field(default_factory=list)
+
+    # 计量：token 与延迟，W4 的对比实验要用
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_ms: float = 0.0
+
+    @property
+    def cited_locations(self) -> list[str]:
+        """所有材料的定位串 —— 用来人工核对模型引用的编号是否存在。"""
+        return [h.location for h in self.hits]

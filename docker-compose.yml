@@ -77,3 +77,14 @@ services:
     depends_on:
       - etcd
       - minio
+  
+  attu:
+    container_name: milvus-attu
+    image: zilliz/attu:latest
+    environment:
+      # 同一 compose 网络内，直接用服务名 + 内部端口
+      MILVUS_URL: standalone:19530
+    ports:
+      - "8000:3000"   # 浏览器访问 http://localhost:8000
+    depends_on:
+      - standalone

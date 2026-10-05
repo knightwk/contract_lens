@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model_name: str = ""
+    # 审查 / 抽取类任务用低温：出错代价高，需要确定性输出。
+    # 同一流程里保持统一低温，避免不确定性叠加。
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 1024
+    llm_timeout: float = 60.0
+    llm_max_retries: int = 3
+
+    # === RAG 检索 ===
+    # 送给 LLM 的材料条数。W2 的策略是「宽进严出」—— 这里放宽，精排再收紧。
+    rag_top_k: int = 10
+    # 材料部分的 token 上限，超出则截断（防止撑爆上下文）
+    rag_context_max_tokens: int = 3000
 
     # === 模型 Provider 总开关 ===
     embedding_provider: Literal["local", "api"] = "local"

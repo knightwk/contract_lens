@@ -54,6 +54,16 @@ _NO_CLAUSE = ""
 _NO_PAGE = -1
 
 
+def _escape_expr(value: str) -> str:
+    """转义 Milvus 表达式里的字符串字面量。
+
+    Milvus 的 filter 是类 SQL 表达式，字符串用双引号包起来。
+    不转义的话，值里一旦出现双引号或反斜杠，表达式就会被截断
+    —— 而且**只在运行时才报错**。这是所有"拼接式查询"的通病。
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 class VectorStoreError(Exception):
     """Milvus 操作失败。"""
 
@@ -257,6 +267,52 @@ class VectorStore:
     async def list_doc_ids(self) -> list[str]:
         """列出已入库的文档 ID。"""
         return await asyncio.to_thread(self._list_doc_ids_sync)
+
+    def _get_chunks_by_clause_sync(self, clause_no: str, doc_id: str | None) -> list[dict]:
+        """按条款号精确取块（不走相似度排序）。
+
+        为什么需要它（不是 search_* 能替代的）
+            search_dense / search_bm25 / hybrid_search 都是"按相似度找 top-k"，
+            哪怕把 k 加大也可能【始终拿不到某个特定条款】——
+            实测：Agent 反复搜「第十五条」，返回的一直是第二十六条。
+
+            这里是"按标量字段等值查询"，命中就是命中，不参与排序。
+
+        ⚠️ clause_no 会重复（附件里也有「第一条」），所以支持用 doc_id 收窄。
+        """
+        expr = f'clause_no == "{_escape_expr(clause_no)}"'
+        if doc_id:
+            expr += f' and doc_id == "{_escape_expr(doc_id)}"'
+
+        result = self._get_client().query(
+            collection_name=self.collection_name,
+            filter=expr,
+            output_fields=[
+                "chunk_id",
+                "doc_id",
+                "text",
+                "clause_no",
+                "clause_title",
+                "section",
+                "page",
+                "char_start",
+                "char_end",
+            ],
+            limit=50,
+        )
+
+        rows: list[dict] = []
+        for r in result:
+            row = dict(r)
+            # 哨兵还原：库里 -1 表示"无页信息"（见 _chunk_to_row）
+            if row.get("page") == _NO_PAGE:
+                row["page"] = None
+            rows.append(row)
+        return rows
+
+    async def get_chunks_by_clause(self, clause_no: str, doc_id: str | None = None) -> list[dict]:
+        """按条款号精确取块；doc_id 可选，用于在同名条款间收窄。"""
+        return await asyncio.to_thread(self._get_chunks_by_clause_sync, clause_no, doc_id)
 
     # ---------- 写入 ----------
 

@@ -119,9 +119,22 @@ async def main() -> int:
     return 0 if ok else 1
 
 
+async def main_():
+    from app.agent.tools import call_tool
+
+    # ① 少传必填参数
+    await call_tool("get_clause_details", {})
+    # ② 传了不存在的参数
+    await call_tool("get_clause_details", {"wrong": 1})
+    # ③ 类型不对
+    await call_tool("get_clause_details", {"clause_no": 123})
+    # ④ 工具名不存在
+    await call_tool("no_such_tool", {})
+
+
 if __name__ == "__main__":
     try:
-        raise SystemExit(asyncio.run(main()))
+        raise SystemExit(asyncio.run(main_()))
     except NotImplementedError as exc:
         print("\n" + "=" * 74)
         print(f"👉 还没写：{exc}")

@@ -16,6 +16,7 @@ from app.core.llm import LLMError, llm_client
 from app.core.logger import logger
 from app.core.retriever import retrieve
 from app.core.schemas import RagAnswer, SearchHit
+from app.core.timing import Timing
 
 # 系统提示词。两条硬要求都来自 docs/conventions.md 约定 5：
 #   ① 不得编造 —— 材料里没有的必须明说，而不是猜一个像样的答案
@@ -32,12 +33,11 @@ SYSTEM_PROMPT = """你是一名资深的合同审查专员，
     1. 只能依据材料回答，材料中没有相关内容就说“材料中无相关内容，无法回答。”
     2. 每条结论必须标出来自哪一条材料。
 输出格式：
-先给结论，再列依据。
-
-结论：<一句话回答>
-依据：
-- <条款号> <条款标题> · 第 <页码> 页 · [<材料标识>]
-- ……
+- 材料能回答时：先给结论，再列依据
+    结论：<一句话回答>
+    依据：
+    - <条款号> <条款标题> · 第 <页码> 页 · [<材料标识>]
+- 材料不足时：只输出一行「无法回答」，不要写依据段
 """
 
 
@@ -87,13 +87,26 @@ def build_messages(question: str, hits: list[SearchHit]) -> list[dict]:
     ]
 
 
-async def answer(question: str, *, top_k: int | None = None) -> RagAnswer:
+async def answer(
+    question: str,
+    *,
+    top_k: int | None = None,
+    timing: Timing | None = None,
+) -> RagAnswer:
     """完整链路：检索 → 组装 → 调用 → 返回带材料的回答。
 
     注意返回的是 RagAnswer，它把 hits 一起带回来了 ——
     这样调用方能核对"模型引用的那条真的存在吗"（约定 5）。
+
+    Args:
+        timing: 分段耗时收集器。会记录 retrieve（内含 embed_query / search_dense）
+                和 llm 两段；不传就建一个临时的。
     """
-    hits = await retrieve(question, top_k=top_k)
+    timing = timing or Timing()
+
+    with timing.span("retrieve"):
+        hits = await retrieve(question, top_k=top_k, timing=timing)
+
     if not hits:
         logger.warning(f"没有检索到任何材料：{question}")
         return RagAnswer(question=question, answer="没有检索到相关条款。")
@@ -109,6 +122,9 @@ async def answer(question: str, *, top_k: int | None = None) -> RagAnswer:
     except LLMError as exc:
         logger.error(f"LLM 调用失败：{exc}")
         raise
+
+    # LLM 的耗时由 llm.py 自己测（它要区分重试与真实生成），这里只并进来
+    timing.add("llm", result.latency_ms)
 
     return RagAnswer(
         question=question,

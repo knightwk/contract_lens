@@ -239,6 +239,25 @@ class VectorStore:
     async def count_rows(self) -> int:
         return await asyncio.to_thread(self._count_rows_sync)
 
+    def _list_doc_ids_sync(self) -> list[str]:
+        """知识库里出现过的 doc_id（去重排序）。
+
+        ⚠️ MilvusClient 是【同步】客户端 —— query() 返回的是结果对象，不是协程。
+           必须走 to_thread，否则会阻塞事件循环（见 decisions.md D-028）。
+           直接 await 它只会得到 "can't be used in 'await' expression"。
+        """
+        result = self._get_client().query(
+            collection_name=self.collection_name,
+            filter="",
+            output_fields=["doc_id"],
+            limit=10000,
+        )
+        return sorted({r.get("doc_id", "") for r in result if r.get("doc_id")})
+
+    async def list_doc_ids(self) -> list[str]:
+        """列出已入库的文档 ID。"""
+        return await asyncio.to_thread(self._list_doc_ids_sync)
+
     # ---------- 写入 ----------
 
     @staticmethod

@@ -89,7 +89,7 @@ async def _search_clauses(query: str, top_k: int = 5) -> str:
         has_clause = any((h.section, h.clause_no, h.clause_title))
         label = h.location if has_clause else "（无条款定位）"
         page = f"第 {h.page} 页" if h.page is not None else "无页码"
-        lines.append(f"[{h.chunk_id}] {label} · {page}\n{h.text}")
+        lines.append(f"[{h.chunk_id}] {label} · {h.doc_id} {page}\n{h.text}")
     return "\n\n".join(lines)
 
 
@@ -99,6 +99,7 @@ async def _list_documents() -> str:
     只用 vector_store 的公开方法 —— 之前直接伸手去拿 _get_client() 是设计问题：
     需要 # noqa 去压 lint 警告，本身就是"公开 API 缺了一块"的信号。
     """
+    # raise RuntimeError("故意炸一下")
     doc_ids = await vector_store.list_doc_ids()
     if not doc_ids:
         return "知识库里还没有任何文档。"

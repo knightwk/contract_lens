@@ -24,6 +24,7 @@ from typing import Any
 from app.agent.tools import TOOLS, call_tool
 from app.config import settings
 from app.core.llm import llm_client
+from app.core.rag import MATERIAL_MARKER_RE
 
 SYSTEM_PROMPT = """你是一个合同审查助手。
 
@@ -32,6 +33,7 @@ SYSTEM_PROMPT = """你是一个合同审查助手。
 2. 可以多次调用工具，但不要重复查同样的内容
 3. 每一条结论都要引用材料标识，格式：[<标识>]
 4. 材料里没有的，就明说做不到 —— 不要猜
+# 注意：你还能调用 {N} 次工具。
 """
 
 MAX_STEPS = 6
@@ -51,6 +53,7 @@ class AgentRun:
     # "答出来了"和"没答出来" —— 这就是 D-027 那类假阳性。
     # **凡是"下游要判断成败"的地方，都必须给一个机器可读的信号。**
     budget_exhausted: bool = False
+    budget_trace: list[int] = field(default_factory=list)
 
     @property
     def tool_call_count(self) -> int:
@@ -60,6 +63,7 @@ class AgentRun:
         return {
             "steps": self.steps,
             "tool_calls": self.tool_call_count,
+            "budget_trace": self.budget_trace,
             "budget_exhausted": self.budget_exhausted,
             "tools_used": [c.get("function", {}).get("name", "?") for c in self.tool_calls],
         }
@@ -137,14 +141,18 @@ async def run_agent(question: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
     steps = 0
     answer = ""
     tool_calls = []
-    budget_exhasuted = False
+    budget_trace = []
+    budget_exhausted = False
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
+    chunk_ids = []
 
     for _ in range(max_steps):
         steps += 1
+        messages[0]["content"] = SYSTEM_PROMPT.format(N=max_steps - steps)
+        budget_trace.append(max_steps - steps)
         response = await llm_client._get_client().chat.completions.create(
             model=settings.llm_model_name,
             messages=messages,
@@ -167,6 +175,13 @@ async def run_agent(question: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
                 result = await call_tool(tc.function.name, json.loads(tc.function.arguments))
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
+                # 新增信息量检测
+                if tc.function.name == "search_clauses":
+                    this_chunk_ids = set(MATERIAL_MARKER_RE.findall(result))
+                    if not set(this_chunk_ids) - set(chunk_ids):
+                        messages.append({"role": "user", "content": "本次检索没有新增信息，当前信息应该可以回答了。"})
+                    chunk_ids.extend(this_chunk_ids)
+
         elif msg.content:
             answer = msg.content
             break
@@ -175,7 +190,7 @@ async def run_agent(question: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
             break
     else:
         answer = f"我没能在 {max_steps} 步内完成。"
-        budget_exhasuted = True
+        budget_exhausted = True
 
     return AgentRun(
         question=question,
@@ -183,5 +198,6 @@ async def run_agent(question: str, *, max_steps: int = MAX_STEPS) -> AgentRun:
         steps=steps,
         tool_calls=tool_calls,
         messages=messages,
-        budget_exhausted=budget_exhasuted,
+        budget_trace=budget_trace,
+        budget_exhausted=budget_exhausted,
     )

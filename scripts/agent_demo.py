@@ -54,7 +54,7 @@ def render_trace(run) -> None:
 
         elif role == "tool":
             content = str(msg.get("content") or "").replace("\n", " ")
-            print(f"           [工具返回] {content}…")
+            print(f"           [工具返回] {content[:110]}…")
 
 
 async def main() -> int:
@@ -84,15 +84,25 @@ async def main() -> int:
 
     s = run.summary()
     print("\n" + "-" * 74)
-    print(f"步数 {s['steps']} · 工具调用 {s['tool_calls']} 次 · 用过 {s['tools_used']}")
+    print(f"步数 {s['steps']} · 步数变化 {s['budget_trace']} · 工具调用 {s['tool_calls']} 次 · 用过 {s['tools_used']}")
     print("-" * 74)
 
     # 判定要区分三件事，缺一不可：
     #   ① 用了工具吗（不用工具 = 那是 RAG，不是 Agent）
     #   ② 给出结论了吗
     #   ③ 是在步数预算内给的吗（兜底文案也是非空，只看 answer 会假阳性）
-    if s["tool_calls"] == 0:
-        print("❌ Agent 一次工具都没调用就作答了 —— 那是 RAG，不是 Agent")
+    # ⚠️ tool_calls == 0 有【两个完全不同的原因】，单一信号区分不了：
+    #   (a) 有预算却不调工具、凭记忆作答  -> 那是 RAG 退化，失败
+    #   (b) 预算一开始就是 0（max_steps 太小）-> 模型被禁止调工具，属于【预期退化】
+    # 之前把 (b) 也判成 (a) —— 判定信号不足以区分情况（同 D-027 那类误判）。
+    no_tool_budget = bool(s["budget_trace"]) and min(s["budget_trace"]) <= 0
+
+    if s["tool_calls"] == 0 and no_tool_budget:
+        print("ℹ️ 工具预算为 0（max_steps 太小）—— 模型无法调用工具，这条不算失败。")
+        print("   要看的是：它有没有【拒绝编造】，而不是拿行业惯例硬答。")
+        ok = True
+    elif s["tool_calls"] == 0:
+        print("❌ 有工具预算却一次都没调用就作答 —— 那是 RAG，不是 Agent")
         ok = False
     elif s.get("budget_exhausted"):
         print(f"❌ 步数用尽（{s['steps']} 步）仍未得出结论 —— 循环控制需要改进（A3）")

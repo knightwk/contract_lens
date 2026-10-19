@@ -194,6 +194,9 @@ async def _search_clauses(query: str, top_k: int = 5) -> str:
 # ══════════════════════════════════════════════════════════════════
 async def _get_clause_detail(clause_no: str, doc_id: str | None = None) -> str:
     rows = await vector_store.get_chunks_by_clause(clause_no=clause_no, doc_id=doc_id)
+    if not rows:
+        scope = f"（限定文档 {doc_id}）" if doc_id else ""
+        return f"没有找到条款「{clause_no}」{scope}的原文。"
     return _format_hits(rows=rows)
 
 

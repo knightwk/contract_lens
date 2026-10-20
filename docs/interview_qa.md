@@ -158,9 +158,15 @@ return 1 if unknown else 0          # → 返回 0，判定通过
 
 ### 它没给我什么（这部分只有两个都写过才答得出）
 
-1. **不给免费的边界**
-   手写版 `for _ in range(max_steps)` 天然有上界，图**没有** ——
-   硬上限必须在条件边里自己实现。**我一开始就漏了，是步数跑超才发现的。**
+1. **不给软着陆**
+   **硬上限框架是给的** —— `config={"recursion_limit": 4}` 超出会抛
+   `GraphRecursionError`（默认 25）。但它是**抛异常**，不是"告诉用户我没能完成"。
+   业务层的优雅收尾（预算提示 + `budget_exhausted`）仍然得自己写。
+
+   > 一句话：**框架给了硬刹车，不给你软着陆。**
+
+   （补充：额度检查放哪条边也得自己想。我一开始放在 `agent → tools` 上，
+   结果会 strand 住已经发出的 `tool_calls` —— 正确位置是 `tools → agent`。）
 
 2. **不管正确性**
    A4 期间我踩了 8 个 bug：role 拼成 `assitant`、`json.load` 写成 `load`、

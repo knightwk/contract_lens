@@ -16,7 +16,7 @@
 import json
 import operator
 import sys
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -24,6 +24,7 @@ sys.path.append(r"F:\llm\projects\contract_lens")
 from app.agent.tools import TOOLS, call_tool
 from app.config import settings
 from app.core.llm import llm_client
+from app.core.logger import logger
 from app.core.rag import MATERIAL_MARKER_RE
 
 MAX_STEPS = 6
@@ -75,8 +76,6 @@ class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     # 已见过的条目必须追加：它记录【跨轮次】的累积
     chunk_ids: Annotated[list[str], operator.add]
-    # 预算轨迹必须追加：用来观测倒数是否生效
-    budget_trace: Annotated[list[int], operator.add]
     steps: int  # 覆盖（每轮 +1，只要当前值）
 
 
@@ -86,26 +85,21 @@ class AgentState(TypedDict):
 async def agent_node(state: AgentState) -> dict:
     remaining = MAX_STEPS - state["steps"] - 1
     # state["messages"][0]["content"] = SYSTEM_PROMPT
-    state["messages"][0]["content"] = SYSTEM_PROMPT.format(N=remaining)
+    system_msg = {"role": "system", "content": SYSTEM_PROMPT.format(N=remaining)}
     response = await llm_client._get_client().chat.completions.create(
         model=settings.llm_model_name,
-        messages=state["messages"],
+        messages=[system_msg, *state["messages"][1:]],
         temperature=settings.llm_temperature,
         tools=TOOLS,
     )
 
     msg = response.choices[0].message
-    res = {
-        "steps": state["steps"] + 1,
-        "budget_trace": [remaining],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [tc.model_dump() for tc in msg.tool_calls] if msg.tool_calls else [],
-            }
-        ],
-    }
+    entry = {"role": "assistant", "content": msg.content or ""}
+    if msg.tool_calls:
+        entry["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
+
+    logger.debug(f"[agent] remaining={remaining} steps={state['steps']}")
+    res = {"steps": state["steps"] + 1, "messages": [entry]}
     return res
 
 
@@ -165,10 +159,14 @@ async def tools_node(state: AgentState) -> dict:
 
 
 # ══════════════════ TODO-A4-3：条件边 ══════════════════
-def should_continue(state: AgentState) -> str:
+def should_loop(state: AgentState) -> str:
     if state["steps"] >= MAX_STEPS:
         return "end"
 
+    return "agent"
+
+
+def should_call_tools(state: AgentState) -> str:
     msg = state["messages"][-1]
     if msg.get("tool_calls"):
         return "tools"
@@ -188,7 +186,7 @@ def should_continue(state: AgentState) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
-def build_graph():
+def build_graph(checkpointer: Any = None):
     """接线（样板，已写好）。
 
     对比手写版的 for 循环：
@@ -196,6 +194,9 @@ def build_graph():
         图：     节点 + 边 + 条件边，循环由「边」表达
 
     条件边就是手写版里的 if/break —— 只不过它被声明成一张"路由表"。
+
+    Args:
+        checkpointer: 传了就每步落盘状态（A5）。不传就是无状态的一次性运行。
     """
     builder = StateGraph(AgentState)
 
@@ -205,17 +206,33 @@ def build_graph():
     builder.set_entry_point("agent")
     builder.add_conditional_edges(
         "agent",
-        should_continue,
+        should_call_tools,
         {"tools": "tools", "end": END},
     )
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges(
+        "tools",
+        should_loop,
+        {"agent": "agent", "end": END},
+    )
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
-async def run_graph(question: str, *, max_steps: int = MAX_STEPS) -> dict:
-    """跑一次图，返回最终状态。"""
-    graph = build_graph()
+async def run_graph(
+    question: str,
+    *,
+    max_steps: int = MAX_STEPS,
+    checkpointer: Any = None,
+    thread_id: str | None = None,
+) -> dict:
+    """跑一次图，返回最终状态。
+
+    Args:
+        checkpointer: 状态持久化器。传了才能续跑 / 多轮。
+        thread_id:    会话标识。同一个 thread_id 的状态会在 checkpointer 里累积 ——
+                      这就是"多轮对话"的实现方式。
+    """
+    graph = build_graph(checkpointer=checkpointer)
     initial: AgentState = {
         "question": question,
         "messages": [
@@ -223,7 +240,10 @@ async def run_graph(question: str, *, max_steps: int = MAX_STEPS) -> dict:
             {"role": "user", "content": question},
         ],
         "chunk_ids": [],
-        "budget_trace": [],
         "steps": 0,
     }
-    return await graph.ainvoke(initial)
+    config = {
+        # "recursion_limit": 8,
+        "configurable": {"thread_id": thread_id or "default"},
+    }
+    return await graph.ainvoke(initial, config=config)

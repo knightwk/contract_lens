@@ -26,7 +26,7 @@ _logger.remove()
 
 # 控制台：带颜色，给人看
 _logger.add(
-    sys.stdout,
+    sys.stderr,
     level=settings.log_level,
     colorize=True,
     format=_CONSOLE_FORMAT,

@@ -35,6 +35,7 @@
 | EXP-010 | 工具选择行为与错误参数处理 | A2（Agent 阶段） | ✅ 已测出 |
 | EXP-011 | 手写 ReAct vs LangGraph：数据与踩坑记录 | A4（Agent 阶段） | 🔄 数据已齐，结论待填 |
 | EXP-012 | Checkpointer、多轮对话与两个上限的单位问题 | A5（Agent 阶段） | ✅ 完成 |
+| EXP-013 | MCP server 端到端：协议往返、schema 生成、mime_type 一致性 | B1 | ✅ 完成 |
 
 ---
 
@@ -1335,6 +1336,97 @@ GraphRecursionError: Recursion limit of 8 reached
 **前两次是"代码不在链路上"，第三次是"链路在，但被更早的机制抢了"。**
 
 > **结论：写完一段逻辑，必须验证它真的被执行过（最便宜的办法是 `print` 一行）。**
+
+---
+
+## EXP-013｜MCP server 端到端：协议往返、schema 生成、mime_type 一致性
+
+**状态**：✅ 完成（`mcp 2.2.0`）
+
+### 背景
+
+B1 把知识库能力暴露成 MCP server。真正要验的不是"代码能跑"，而是
+**协议层是否真的说得通** —— 用官方 SDK 客户端走一遍完整往返（`stdio` 传输）。
+
+不用 Inspector：它要额外装 Node 工具链，而 SDK 客户端走的是**完全一样的协议**，
+还顺便验证了 stdio 传输本身（那正是 Claude Desktop 用的方式）。
+
+### 结果
+
+| 检查 | 结果 |
+| --- | --- |
+| `list_tools` | 2 个工具，参数描述**全部齐全** |
+| `list_resources` | `documents <contractlens://documents>`，mime `application/json` |
+| `read_resource` + `json.loads()` | ✅ `{"count": 3, "documents": [...]}` 解析成功 |
+| `call_tool("search_clauses")` | ✅ 返回真实条款 |
+| `call_tool("get_clause_details")` | ✅ 返回第十五条全文 |
+
+### 发现一：v2 里 FastMCP 已改名，且不再解析 docstring 参数
+
+| | v1 | v2（本项目） |
+| --- | --- | --- |
+| 入口类 | `FastMCP` | **`MCPServer`**（`mcp.server.mcpserver`） |
+| 参数描述来源 | 解析 docstring 的 `Args:` 段 | **不解析**，必须 `Annotated[type, Field(description=...)]` |
+
+**实测**：即使写 Google 风格的 `Args:` 段，参数的 `description` **仍然是空的**；
+换成 `Annotated` + `Field` 才有。
+
+**为什么必须 `Annotated` 而不能只用 `Field`**（实测）：
+
+| 写法 | `f()` 返回 | 注解解析 |
+| --- | --- | --- |
+| `def f(x: int = Field(...))` | **`FieldInfo(...)`** ← 默认值被污染 | 只有 `int`，元数据丢失 |
+| `def f(x: Annotated[int, Field(...)] = 5)` | `5` ✅ | `Annotated[int, FieldInfo]` ✅ |
+
+**根因**：函数签名里 `=` 后面那个位置**只能放默认值**。
+类体里 `x: int = Field(...)` 能单独用，是因为 `ModelMetaclass` 专门接管了那个位置 ——
+**函数签名没有这层魔法**，所以必须用 `Annotated`（PEP 593）把元数据挂到**类型**上。
+
+**附带好处**：`Annotated` 的类型可复用（定义一次 `TopK = Annotated[int, Field(...)]`，多处使用）。
+
+### 发现二：协议线上 camelCase，Python 对象 snake_case
+
+| 位置 | 命名 |
+| --- | --- |
+| MCP 协议（JSON 线上） | `inputSchema`、`mimeType` |
+| Python SDK 的 pydantic 模型 | **`input_schema`**、**`mime_type`** |
+
+端到端脚本第一版按线上名字写成 `t.inputSchema` / `r.mimeType`，**AttributeError** —— 由用户发现并修正。
+
+> **看到两种写法并存时，先分清手上是「协议报文」还是「Python 对象」。**
+
+### 发现三：`mime_type` 是契约，不是注释
+
+最初 `documents` 资源声明 `application/json`，但实际返回纯文本
+（`"已入库的文档 ID：\n- ..."`）—— **客户端按 JSON 解析会直接失败**。
+
+改成返回真 JSON 后，端到端脚本里 `json.loads()` 那一步才通过。
+
+> **声明什么类型就必须真返回什么类型**，否则错误发生在客户端，而服务端日志一切正常。
+
+### 发现四（未解决）：日志写 stdout 会污染 stdio 协议
+
+`app/core/logger.py` 把日志接到 `sys.stdout`，而 **stdio 传输下 stdout 被 JSON-RPC 独占**。
+
+**本次运行没有爆**，但**不能据此认为没问题** —— 可能是客户端容忍了非法行，
+也可能那条日志没进协议流。**待实测确认**：
+
+> 在 `serve()` 里 `print("hello")`，再跑一次端到端。
+> 如果客户端报 JSON 解析错误 → 确认污染；如果仍然正常 → 说明客户端会跳过非法行。
+
+**规范做法**：MCP server 的日志一律走 stderr 或文件。
+
+### 结论
+
+MCP 的价值**不是"少写代码"**，而是：
+
+1. **schema 由类型系统保证** —— 手写 JSON schema 时踩过的 `parameter`（少个 s）、
+   `"str"`（不是 `"string"`）这类坑，**在协议层不可能发生**
+2. **白送两样手写时想不到的东西**：`default` 变结构化、**`output_schema`**
+3. **一次实现，任何 MCP 客户端可挂载** —— 不用为每个客户端重写集成
+
+**但代价是新的坑**：v2 改名、docstring 不解析、camelCase/snake_case 混淆、
+stdout 污染 —— **这些只有真跑一遍才会遇到。**
 
 ---
 

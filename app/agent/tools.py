@@ -93,6 +93,26 @@ TOOLS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_clauses",
+            "description": (
+                "获取两份文档中相同条款的原文内容。"
+                "当你已经拥有并且知道多份文档标识以及条款信息，要获取或对比两份文档中的同一条款原文内容使用。"
+                "返回两份文档中各自检索到的条款原文。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_a": {"type": "string", "description": "其中一个文档的标识，例如「ff478537646e1277」。"},
+                    "doc_b": {"type": "string", "description": "另一个文档的标识，例如「ff478537646e1278」。"},
+                    "clause_key": {"type": "string", "description": "要对比的条款信息关键字。"},
+                },
+                "required": ["doc_a", "doc_b", "clause_key"],
+            },
+        },
+    },
 ]
 
 
@@ -213,10 +233,24 @@ async def _list_documents() -> str:
     return "已入库的文档 ID：\n" + "\n".join(f"- {d}" for d in doc_ids)
 
 
+async def _compare_clauses(doc_a: str, doc_b: str, clause_key: str) -> str:
+    doc_ids = await vector_store.list_doc_ids()
+    if doc_a not in doc_ids:
+        return f"文档 「{doc_a}」 不在库里，现有文档是 [{', '.join(doc_ids)}]"
+    if doc_b not in doc_ids:
+        return f"文档 「{doc_a}」 不在库里，现有文档是 [{', '.join(doc_ids)}]"
+
+    clause_a = await vector_store.get_chunks_by_clause(clause_no=clause_key, doc_id=doc_a)
+    clause_b = await vector_store.get_chunks_by_clause(clause_no=clause_key, doc_id=doc_b)
+
+    return f"文档「{doc_a}」中条款内容如下：\n{_format_hits(clause_a)}\n\n 文档「{doc_b}」中条款内容如下：\n{_format_hits(clause_b)}"
+
+
 _HANDLERS = {
     "search_clauses": _search_clauses,
     "get_clause_details": _get_clause_detail,
     "list_documents": _list_documents,
+    "compare_clauses": _compare_clauses,
 }
 
 

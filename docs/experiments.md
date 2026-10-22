@@ -33,7 +33,7 @@
 | EXP-008 | Agent 循环的收敛速度不稳定（同问题两次跑法不同） | A1（Agent 阶段） | ✅ 已测出 |
 | EXP-009 | Agent 的失败模式实测：工具异常 / 工具预算耗尽 | A3（Agent 阶段） | ✅ 已测出 |
 | EXP-010 | 工具选择行为与错误参数处理 | A2（Agent 阶段） | ✅ 已测出 |
-| EXP-011 | 手写 ReAct vs LangGraph：数据与踩坑记录 | A4（Agent 阶段） | 🔄 数据已齐，结论待填 |
+| EXP-011 | 手写 ReAct vs LangGraph：数据与踩坑记录 | A4（Agent 阶段） | ✅ 完成 |
 | EXP-012 | Checkpointer、多轮对话与两个上限的单位问题 | A5（Agent 阶段） | ✅ 完成 |
 | EXP-013 | MCP server 端到端：协议往返、schema 生成、mime_type 一致性 | B1 | ✅ 完成 |
 | EXP-014 | 复核 Agent 与 HITL：条件升级、强制收口、字段塌缩 | B3 | ✅ 完成 |
